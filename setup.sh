@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export USER_MODULE=myrouter1
+export USER_MODULE=myrouter
 export TEST_MODULE=routertests1.srpy
 
 args=`getopt c $*`

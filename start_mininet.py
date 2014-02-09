@@ -69,11 +69,9 @@ def reset_macs(net, node, macbase):
     for intf in node_object.intfList():
         print node,intf,node_object.MAC(intf)
 
-def set_route(net, fromnode, prefix, nextnode):
-    # node.setHostRoute(ip, intfname)
+def set_route(net, fromnode, prefix, gw):
     node_object = net.get(fromnode)
-    ilist = node_object.connectionsTo(net.get(nextnode)) 
-    node_object.setDefaultRoute(ilist[0][0])
+    node_object.cmdPrint("route add -net {} gw {}".format(prefix, gw))
 
 def setup_addressing(net):
     router = net.get('router')
@@ -96,12 +94,13 @@ def setup_addressing(net):
     set_ip_pair(net, 'server1','router','192.168.100.1/30','192.168.100.2/30')
     set_ip_pair(net, 'server2','router','192.168.200.1/30','192.168.200.2/30')
     set_ip_pair(net, 'client','router','10.1.1.1/30','10.1.1.2/30')
-    set_route(net, 'server1', '10.0.0.0/30', 'router')
-    set_route(net, 'server1', '192.168.200.0/30', 'router')
-    set_route(net, 'server2', '10.0.0.0/30', 'router')
-    set_route(net, 'server2', '192.168.100.0/30', 'router')
-    set_route(net, 'client', '192.168.100.0/30', 'router')
-    set_route(net, 'client', '192.168.200.0/30', 'router')
+    set_route(net, 'server1', '10.1.0.0/16', '192.168.100.2')
+    set_route(net, 'server1', '192.168.200.0/24', '192.168.100.2')
+    set_route(net, 'server2', '10.1.0.0/16', '192.168.200.2')
+    set_route(net, 'server2', '192.168.100.0/24', '192.168.200.2')
+    set_route(net, 'client', '192.168.100.0/24', '10.1.1.2')
+    set_route(net, 'client', '192.168.200.0/24', '10.1.1.2')
+    set_route(net, 'client', '172.16.0.0.16', '10.1.1.2')
 
     forwarding_table = open('forwarding_table.txt', 'w')    
     table = '''192.168.100.0 255.255.255.0 192.168.100.1 router-eth0

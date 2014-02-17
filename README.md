@@ -1,5 +1,12 @@
 COSC465 IP router projects
 ==========================
+Computer Networking
+
+ * <b>Project 3</b>: Implement functionality to respond to ARP requests for interfaces assigned on the router
+
+====
+<b>Further Documentation:</b>
+
 
 This repo contains starter files and scripts for a series of projects for building an IP router in Python.
 

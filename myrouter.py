@@ -18,6 +18,11 @@ from srpy_common import log_info, log_debug, log_warn, SrpyShutdown, SrpyNoPacke
 class Router(object):
     def __init__(self, net):
         self.net = net
+        self.myports = dict()       # ethernet address translations for my ip addresses as key: ipaddr, value: ethaddr
+        self.maccache = dict()      # cached MAC addresses from elsewhere on network as key: ipaddr, value: MAC addr
+
+        for intf in net.interfaces():
+            self.myports[intf.ipaddr] = intf.ethaddr
 
     def router_main(self):    
         while True:
@@ -29,6 +34,61 @@ class Router(object):
             except SrpyShutdown:
                 return
 
+            # cache MAC addresses of incoming packets
+            if cachemac(pkt):
+                print "MAC address cached successfully"
+            else:
+                print "Packet type unrecognized. Failed to cache MAC address"
+
+            # respond to ARP requests for my interfaces
+            arp_reply = self.arpcatch(pkt)
+            if arp_reply != 0:
+                print "Packet is an ARP request for me. Sending reply..."
+                self.net.send_packet(dev, arp_reply)
+                continue
+
+    def cachemac(self,pkt):
+        if pkt.type = pkt.IP_TYPE:
+            self.maccache[pkt.payload.srcip] = pkt.src
+        else if pkt.type = pkt.ARP_TYPE:
+            self.maccache[pkt.payload.protosrc] = pkt.src
+        else if pkt.type = pkt.VLAN_TYPE:
+            pass # to do!
+        else if pkt.type = pkt.MPLS_TYPE:
+            pass # to do!
+        else:
+            return 0
+        return 1
+
+    def arpcatch(self,pkt):
+        # is this an ARP request?
+        print pkt.type
+        if pkt.type != ARP_TYPE
+            return 0    # no
+
+        # is it for me?
+        print pkt.payload.protodst
+        if not pkt.payload.protodst in self.myports.keys():
+            return 0    # no
+        
+        # generate ARP reply
+        arp_reply = pktlib.arp()
+        arp_reply.opcode = pktlib.arp.REPLY
+        arp_reply.protosrc = pkt.payload.protodst
+        arp_reply.protodst = pkt.payload.protosrc
+        arp_reply.hwsrc = self.myports[pkt.arp.protodst]
+        arp_reply.hwdst = pkt.payload.hwsrc
+
+        ether_reply = pktlib.ethernet()
+        ether_reply.type = ether_reply.ARP_TYPE
+        ether_reply.src = pkt.dst
+        ether_reply.dst = pkt.src
+        ether_reply.set_payload(arp_reply)
+
+        print ether_reply.dump()
+        
+        # hand off ARP reply back to router main
+        return ether_reply
 
 def srpy_main(net):
     '''

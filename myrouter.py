@@ -24,6 +24,9 @@ class Router(object):
         for intf in net.interfaces():
             self.myports[intf.ipaddr] = intf.ethaddr
 
+        print self.myports.keys()
+        print
+
     def router_main(self):    
         while True:
             try:
@@ -40,30 +43,32 @@ class Router(object):
                 print "Packet is an ARP request for me. Logging and sending reply..."
                 self.net.send_packet(dev, arp_reply)
                 self.maccache[pkt.payload.protosrc] = pkt.src
+                print ""
                 continue
+
+            print "Skippy skip\n"
 
     def arpcatch(self,pkt):
         # is this an ARP request?
-        print pkt.type
-        if pkt.type != ARP_TYPE
+        if pkt.type != pkt.ARP_TYPE:
             return 0    # no
 
         # is it for me?
-        print pkt.payload.protodst
         if not pkt.payload.protodst in self.myports.keys():
             return 0    # no
         
+        print pkt.dump()
         # generate ARP reply
         arp_reply = pktlib.arp()
         arp_reply.opcode = pktlib.arp.REPLY
         arp_reply.protosrc = pkt.payload.protodst
         arp_reply.protodst = pkt.payload.protosrc
-        arp_reply.hwsrc = self.myports[pkt.arp.protodst]
+        arp_reply.hwsrc = self.myports[pkt.payload.protodst]
         arp_reply.hwdst = pkt.payload.hwsrc
 
         ether_reply = pktlib.ethernet()
         ether_reply.type = ether_reply.ARP_TYPE
-        ether_reply.src = pkt.dst
+        ether_reply.src = self.myports[pkt.payload.protodst]
         ether_reply.dst = pkt.src
         ether_reply.set_payload(arp_reply)
 

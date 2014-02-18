@@ -34,31 +34,13 @@ class Router(object):
             except SrpyShutdown:
                 return
 
-            # cache MAC addresses of incoming packets
-            if cachemac(pkt):
-                print "MAC address cached successfully"
-            else:
-                print "Packet type unrecognized. Failed to cache MAC address"
-
-            # respond to ARP requests for my interfaces
+            # respond to ARP requests for my interfaces and log IP/Ethernet mapping
             arp_reply = self.arpcatch(pkt)
             if arp_reply != 0:
-                print "Packet is an ARP request for me. Sending reply..."
+                print "Packet is an ARP request for me. Logging and sending reply..."
                 self.net.send_packet(dev, arp_reply)
+                self.maccache[pkt.payload.protosrc] = pkt.src
                 continue
-
-    def cachemac(self,pkt):
-        if pkt.type = pkt.IP_TYPE:
-            self.maccache[pkt.payload.srcip] = pkt.src
-        else if pkt.type = pkt.ARP_TYPE:
-            self.maccache[pkt.payload.protosrc] = pkt.src
-        else if pkt.type = pkt.VLAN_TYPE:
-            pass # to do!
-        else if pkt.type = pkt.MPLS_TYPE:
-            pass # to do!
-        else:
-            return 0
-        return 1
 
     def arpcatch(self,pkt):
         # is this an ARP request?

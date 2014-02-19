@@ -18,14 +18,11 @@ from srpy_common import log_info, log_debug, log_warn, SrpyShutdown, SrpyNoPacke
 class Router(object):
     def __init__(self, net):
         self.net = net
-        self.myports = dict()       # ethernet address translations for my ip addresses as key: ipaddr, value: ethaddr
-        self.maccache = dict()      # cached MAC addresses from elsewhere on network as key: ipaddr, value: MAC addr
+        self.myports = dict()       # ethernet address translations for my ip addresses (key: ipaddr, value: ethaddr)
+        self.maccache = dict()      # cached MAC addresses from elsewhere on network (key: ipaddr, value: MAC addr)
 
         for intf in net.interfaces():
             self.myports[intf.ipaddr] = intf.ethaddr
-
-        print self.myports.keys()
-        print
 
     def router_main(self):    
         while True:
@@ -38,17 +35,12 @@ class Router(object):
                 return
 
             # respond to ARP requests for my interfaces and log IP/Ethernet mapping
-            arp_reply = self.arpcatch(pkt)
+            arp_reply = self.arphandler(pkt)
             if arp_reply != 0:
-                print "Packet is an ARP request for me. Logging and sending reply..."
                 self.net.send_packet(dev, arp_reply)
                 self.maccache[pkt.payload.protosrc] = pkt.src
-                print ""
-                continue
 
-            print "Skippy skip\n"
-
-    def arpcatch(self,pkt):
+    def arphandler(self,pkt):
         # is this an ARP request?
         if pkt.type != pkt.ARP_TYPE:
             return 0    # no
@@ -57,7 +49,6 @@ class Router(object):
         if not pkt.payload.protodst in self.myports.keys():
             return 0    # no
         
-        print pkt.dump()
         # generate ARP reply
         arp_reply = pktlib.arp()
         arp_reply.opcode = pktlib.arp.REPLY
@@ -71,8 +62,6 @@ class Router(object):
         ether_reply.src = self.myports[pkt.payload.protodst]
         ether_reply.dst = pkt.src
         ether_reply.set_payload(arp_reply)
-
-        print ether_reply.dump()
         
         # hand off ARP reply back to router main
         return ether_reply

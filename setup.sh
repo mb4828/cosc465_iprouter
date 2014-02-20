@@ -1,7 +1,7 @@
 #!/bin/bash
 
-export USER_MODULE=myrouter
-export TEST_MODULE=routertests1.srpy
+export USER_MODULE=myrouter1
+export TEST_MODULE=routertests1.py
 
 args=`getopt c $*`
 
@@ -39,7 +39,7 @@ fi
 (
 cat <<EOF
 #!/bin/bash
-python ./srpy/srpy.py $USER_MODULE
+python ./srpy/srpy.py \$@ $USER_MODULE
 EOF
 ) > runreal.sh
 chmod +x ./runreal.sh
@@ -47,7 +47,7 @@ chmod +x ./runreal.sh
 (
 cat <<EOF
 #!/bin/bash
-python ./srpy/srpy.py -t -s $TEST_MODULE $USER_MODULE
+python ./srpy/srpy.py \$@ -t -s $TEST_MODULE $USER_MODULE
 EOF
 ) > runtests.sh
 chmod +x ./runtests.sh

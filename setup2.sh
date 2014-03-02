@@ -1,7 +1,7 @@
 #!/bin/bash
 
-export USER_MODULE=myrouter
-export TEST_MODULE=routertests1.srpy
+export USER_MODULE=myrouter2
+export TEST_MODULE=routertests2.srpy
 
 args=`getopt c $*`
 
@@ -15,7 +15,7 @@ if [[ $args == " -c --" ]]; then
     rm -rf pox
     rm -rf srpy
     rm -f *.pyc
-    rm -f runreal.sh runtests.sh
+    rm -f runreal2.sh runtests2.sh
     exit
 fi
 echo "Doing setup."
@@ -41,14 +41,14 @@ cat <<EOF
 #!/bin/bash
 python ./srpy/srpy.py \$@ $USER_MODULE
 EOF
-) > runreal.sh
-chmod +x ./runreal.sh
+) > runreal2.sh
+chmod +x ./runreal2.sh
 
 (
 cat <<EOF
 #!/bin/bash
 python ./srpy/srpy.py \$@ -t -s $TEST_MODULE $USER_MODULE
 EOF
-) > runtests.sh
-chmod +x ./runtests.sh
+) > runtests2.sh
+chmod +x ./runtests2.sh
 

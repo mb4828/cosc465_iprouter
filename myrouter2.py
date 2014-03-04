@@ -19,12 +19,12 @@ from collections import deque
 
 class PacketData(object):
     def __init__(self, pkt, arpreq, interface):
-        self.pkt = pkt              # packet waiting to be sent
-        self.arpreq = arpreq        # copy of the arp request
-        self.interface = interface  # interface that we are sending packets out of
+        self.pkt = pkt                      # packet waiting to be sent
+        self.arpreq = arpreq                # copy of the arp request
+        self.interface = interface          # interface that we are sending packets out of
         self.ip = arpreq.payload.protodst   # ip address that we're wating for (because I'm a lazy programmer)
-        self.lastsent = time.time()
-        self.retries = 5
+        self.lastsent = time.time()         # approximate time of last ARP request
+        self.retries = 5                    # number of retries left
 
     def isExpired(self):
         if time.time()-self.lastsent >= 1:
@@ -242,6 +242,7 @@ class Router(object):
 
         # 4. did we find a match in the table?
         if lm_index == -1:
+            print "No match found in forwarding table"
             return 0    # no
 
         # 5. create a new ethernet header for the packet

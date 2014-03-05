@@ -58,29 +58,31 @@ class Router(object):
             try:
                 dev,ts,pkt = self.net.recv_packet(timeout=1.0)
             except SrpyNoPackets:
-                # update/resend expired jobs in the job queue
+                # 1. update/resend expired jobs in the job queue
                 rv = self.queueupdater()
                 if rv != 0:
-                    self.net.send_packet(rv[0], rv[1])              # re-send ARP req               
+                    self.net.send_packet(rv[0], rv[1])              # re-send ARP req 
+              
                 continue
+
             except SrpyShutdown:
                 return
 
-            # 1. handle ARP replies
+            # 2. handle ARP replies
             rv = self.queuehandler(pkt)
             if rv != 0:
                 self.net.send_packet(rv[0], rv[1])                  # send completed IP packet
                 self.maccache[pkt.payload.protosrc] = pkt.payload.hwsrc # log MAC address
                 continue
 
-            # 2. handle ARP requests for my interfaces
+            # 3. handle ARP requests for my interfaces
             rv = self.arpreqhandler(pkt)
             if rv != 0:
                 self.net.send_packet(dev, rv)                       # send ARP reply
                 self.maccache[pkt.payload.protosrc] = pkt.src       # log MAC address
                 continue
 
-            # 3. handle IP packets destined for me and other hosts
+            # 4. handle IP packets destined for me and other hosts
             rv = self.packethandler(pkt)
             if rv != 0:
                 self.net.send_packet(rv[0], rv[1])                  # send IP packet or ARP req
@@ -178,6 +180,72 @@ class Router(object):
         # 4. hand off ARP reply back to router main
         return ether_reply
 
+    def lpmhelper(self, dstip):
+        '''
+        Helper function for packet handler. Performs Longest Prefix Match on the forwarding table
+        and returns the index of the longest prefix
+        '''
+        lm_index = -1       # index of the packet destination
+        lm_len = -1         # length of longest prefix
+        i = 0
+        l = len(self.ftable)
+        
+        while (i<l):
+            masklen = netmask_to_cidr(self.ftable[i][1])
+            mask_unsigned = (self.ftable[i][1]).toUnsigned()
+            ip_unsigned = dstip.toUnsigned()
+            ip_masked = IPAddr(ip_unsigned & mask_unsigned)
+
+            #print "Checking destination " + str(self.ftable[i][0]) + " with masked IP " + str(ip_masked) + " and mask length " + str(masklen)
+
+            if (ip_masked == self.ftable[i][0]) and (masklen > lm_len):
+                # network address is the longest prefix
+                lm_index = i
+                lm_len = masklen
+            
+            i+=1
+
+        return lm_index
+
+    def packethelper(self, pkt, lm_index):
+        '''
+        Helper function for packet handler. Returns either a finished IP packet or an ARP request
+        based on the contents of pkt and the forwarding table index
+        '''
+        ethhead = pktlib.ethernet()
+        arpreq = pktlib.arp()
+
+        intf = self.net.interface_by_name(self.ftable[lm_index][3])
+        ethhead.src = intf.ethaddr
+        
+        # where are we sending the packet?
+        flag = 0
+        if str(self.ftable[lm_index][2]) == 'x':
+            # straight to the final destination
+            print "Packet should be sent to " + str(pkt.payload.dstip) + " (final destination) via interface " + self.ftable[lm_index][3]
+            arpreq.protodst = pkt.payload.dstip
+        else:
+            # to the next hop
+            print "Packet should be sent to " + str(self.ftable[lm_index][2]) + " (next hop) via interface " + self.ftable[lm_index][3]
+            arpreq.protodst = self.ftable[lm_index][2]
+
+        # are we missing the MAC address of the destination?
+        if not arpreq.protodst in self.maccache.keys():
+            print "ARP request needed"
+            ethhead.type = ethhead.ARP_TYPE
+            ethhead.dst = ETHER_BROADCAST
+            ethhead.payload = arpreq
+            arpreq.opcode = pktlib.arp.REQUEST
+            arpreq.protosrc = intf.ipaddr
+            arpreq.hwsrc = intf.ethaddr
+            arpreq.hwdst = ETHER_BROADCAST
+        else:
+            ethhead.type = ethhead.IP_TYPE
+            ethhead.dst = self.maccache[arpreq.protodst]
+            ethhead.payload = pkt.payload
+
+        return ethhead
+
     def packethandler(self, pkt):
         '''
         Handles packets destined for other hosts by generating either an ARP request
@@ -192,94 +260,26 @@ class Router(object):
         if pkt.payload.dstip in self.myports.keys():
             return 0    # drop the packet
 
-        print "PACKET HANDLER:"
-        print "Pkt src: " + str(pkt.payload.srcip)
-        print "Pkt dst: " + str(pkt.payload.dstip)
+        print "PACKET HANDLER:\nPkt dst: " + str(pkt.payload.dstip)
 
-        # 3. figure out where we are sending the packet
-        lm_index = -1       # index of the packet destination
-        lm_len = -1         # length of the longest prefix
-        l = len(self.ftable)
-
-        # 3a. perform longest prefix match lookup
-        i = 0
-        while (i<l):
-            mask = IPAddr(self.ftable[i][1])
-            masklen = netmask_to_cidr(mask)
-            mask_unsigned = mask.toUnsigned()
-            ip_unsigned = pkt.payload.dstip.toUnsigned()
-            
-            ip_masked = IPAddr(ip_unsigned & mask_unsigned)
-
-            #print "Checking destination " + self.ftable[i][0] + " with masked IP " + str(ip_masked) + " and mask length " + str(masklen)
-
-            if ip_masked == IPAddr(self.ftable[i][0]):
-                # masked IP address matches the network address
-                if masklen > lm_len:
-                    # network address is the longest prefix
-                    lm_index = i
-                    lm_len = masklen
-            
-            i+=1
+        # 3. perform longest prefix match to begin computing packet destination
+        lm_index = self.lpmhelper(pkt.payload.dstip)    # helper functions rock!
 
         # 4. did we find a match in the table?
         if lm_index == -1:
             print "No match found in forwarding table"
             return 0    # no
-        else:
-            print "Packet should be sent to " + str(pkt.payload.dstip) + " out interface " + self.ftable[lm_index][3]
 
-        # 5. create either the finished IP packet or an ARP packet
-        pkt.payload.ttl -= 1        # decrement ttl
+        # 5. create either the finished IP packet or an ARP request
+        pkt.payload.ttl -= 1                            # decrement the ttl
+        ethpkt = self.packethelper(pkt, lm_index)       # helper functions rock!
 
-        ethhead = pktlib.ethernet()
-        arpreq = pktlib.arp()
+        # 6. update job queue if needed
+        if ethpkt.type == ethpkt.ARP_TYPE:
+            self.jobqueue.append(PacketData(pkt,ethpkt,self.ftable[lm_index][3]))
 
-        for intf in self.net.interfaces():
-            if intf.name == self.ftable[lm_index][3]:
-                ethhead.src = intf.ethaddr
-                arpreq.hwsrc = intf.ethaddr
-                arpreq.protosrc = intf.ipaddr
-                break
-
-        # 5a. where are we sending the packet?
-        flag = 0
-        if self.ftable[lm_index][2] == 'x':
-            # answer: straight to the final destination
-            arpreq.protodst = pkt.payload.dstip
-            # are we missing the MAC address of the final destination?
-            if not pkt.payload.dstip in self.maccache.keys():
-                flag = 1    # yes
-            else:
-                ethhead.dst = self.maccache[arpreq.protodst]
-                
-        else:
-            # answer: to the next hop
-            arpreq.protodst = IPAddr(self.ftable[lm_index][2])
-            # are we missing the MAC address of the nexthop?
-            if not IPAddr(self.ftable[lm_index][2]) in self.maccache.keys():
-                flag = 1    # yes
-            else:
-                ethhead.dst = self.maccache[arpreq.protodst]
-
-        # 5b. if we've been flagged, we need to send an ARP request because we're missing our dst
-        if flag:
-            print "ARP request needed"
-            ethhead.type = ethhead.ARP_TYPE
-            ethhead.dst = ETHER_BROADCAST
-            arpreq.opcode = pktlib.arp.REQUEST
-            arpreq.hwdst = ETHER_BROADCAST
-            ethhead.payload = arpreq
-            
-            self.jobqueue.append(PacketData(pkt,ethhead,self.ftable[lm_index][3]))   # add to job queue
-
-        # 5c. otherwise, we can just send the IP packet
-        else:
-            ethhead.type = ethhead.IP_TYPE
-            ethhead.payload = pkt.payload
-
-        print ethhead.dump()
-        return (self.ftable[lm_index][3],ethhead)
+        print ethpkt.dump()
+        return (self.ftable[lm_index][3],ethpkt)
 
     def buildft(self):
         '''
@@ -295,15 +295,15 @@ class Router(object):
                 break
 
             entry = entry.split()
-            ftable.append((entry[0], entry[1], entry[2], entry[3]))
+            ftable.append((IPAddr(entry[0]), IPAddr(entry[1]), IPAddr(entry[2]), entry[3]))  # add entry from txt file to ftable
 
             for intf in self.net.interfaces():
-                myportus = IPAddr(intf.ipaddr.toUnsigned() & intf.netmask.toUnsigned())
-                destus = IPAddr(IPAddr(entry[2]).toUnsigned() & intf.netmask.toUnsigned())
+                myportus = IPAddr(intf.ipaddr.toUnsigned() & intf.netmask.toUnsigned())      # trying to find the netmask that matches
+                nhus = IPAddr(IPAddr(entry[2]).toUnsigned() & intf.netmask.toUnsigned())     # the next hop from txt file
 
-                if myportus == destus:
-                    ftable.append((str(destus), str(intf.netmask), 'x', entry[3]))
-
+                if myportus == nhus:
+                    ftable.append((nhus, intf.netmask, 'x', entry[3]))                       # add next hop from txt file to table
+                                                                                             # using intf netmask and 'x' for nexthop
         f.close()
         return ftable
 

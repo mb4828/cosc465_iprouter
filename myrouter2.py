@@ -219,7 +219,6 @@ class Router(object):
         ethhead.src = intf.ethaddr
         
         # where are we sending the packet?
-        flag = 0
         if str(self.ftable[lm_index][2]) == 'x':
             # straight to the final destination
             print "Packet should be sent to " + str(pkt.payload.dstip) + " (final destination) via interface " + self.ftable[lm_index][3]

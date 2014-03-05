@@ -24,9 +24,9 @@ class PacketData(object):
         self.interface = interface          # interface that we are sending packets out of
         self.ip = arpreq.payload.protodst   # ip address that we're wating for (because I'm a lazy programmer)
         self.lastsent = time.time()         # approximate time of last ARP request
-        self.retries = 5                    # number of retries left
+        self.retries = 4                    # number of retries left
 
-    def isExpired(self):
+    def isTime(self):
         if time.time()-self.lastsent >= 1:
             return 1
         return 0
@@ -38,7 +38,7 @@ class PacketData(object):
 
     def logRetry(self):
         self.lastsent = time.time()
-        self.tries -= 1
+        self.retries -= 1
 
 class Router(object):
     def __init__(self, net):
@@ -51,40 +51,36 @@ class Router(object):
         for intf in net.interfaces():
             self.myports[intf.ipaddr] = intf.ethaddr
 
-        print self.myports.keys()
-        print self.myports.values()
-
     def router_main(self):    
         while True:
+            print "-"*64
+
             try:
                 dev,ts,pkt = self.net.recv_packet(timeout=1.0)
             except SrpyNoPackets:
-                # log_debug("Timeout waiting for packets")
+                # update/resend expired jobs in the job queue
+                rv = self.queueupdater()
+                if rv != 0:
+                    self.net.send_packet(rv[0], rv[1])              # re-send ARP req               
                 continue
             except SrpyShutdown:
                 return
 
-            print "-"*64
-            # 1. update/resend expired jobs in the job queue
-            rv = self.queueupdater()
-            if rv != 0:
-                self.net.send_packet(rv[0], rv[1])                  # re-send ARP req
-
-            # 2. handle ARP replies
+            # 1. handle ARP replies
             rv = self.queuehandler(pkt)
             if rv != 0:
                 self.net.send_packet(rv[0], rv[1])                  # send completed IP packet
                 self.maccache[pkt.payload.protosrc] = pkt.payload.hwsrc # log MAC address
                 continue
 
-            # 3. handle ARP requests for my interfaces
+            # 2. handle ARP requests for my interfaces
             rv = self.arpreqhandler(pkt)
             if rv != 0:
                 self.net.send_packet(dev, rv)                       # send ARP reply
                 self.maccache[pkt.payload.protosrc] = pkt.src       # log MAC address
                 continue
 
-            # 4. handle IP packets destined for me and other hosts
+            # 3. handle IP packets destined for me and other hosts
             rv = self.packethandler(pkt)
             if rv != 0:
                 self.net.send_packet(rv[0], rv[1])                  # send IP packet or ARP req
@@ -103,14 +99,12 @@ class Router(object):
         # 2. is the head of the queue dead? (no more retries)
         if self.jobqueue[0].isDead():
             self.jobqueue.popleft()
-            print "QUEUE UPDATER:"
-            print "Head is dead"
+            print "QUEUE UPDATER:\nRetries left: 0 - ARP request has expired"
             return 0
 
-        # 3. is the head of the queue expired? (time to re-send ARP request)
-        if self.jobqueue[0].isExpired():
-            print "QUEUE UPDATER:"
-            print "Retry #" + self.jobqueue[0].retries
+        # 3. has the head of the queue timed out? (time to re-send ARP request)
+        if self.jobqueue[0].isTime():
+            print "QUEUE UPDATER:\nRetries left on " + str(self.jobqueue[0].ip) + ": " + str(self.jobqueue[0].retries)
             self.jobqueue[0].logRetry()
             return (self.jobqueue[0].interface, self.jobqueue[0].arpreq)
 
@@ -147,6 +141,7 @@ class Router(object):
 
                 del self.jobqueue[i]
 
+                print "Job completed. Ready to send"
                 print ethhead.dump()
                 return (intf, ethhead)
 
@@ -216,13 +211,12 @@ class Router(object):
             
             ip_masked = IPAddr(ip_unsigned & mask_unsigned)
 
-            print "Checking destination " + self.ftable[i][0] + " with masked IP " + str(ip_masked) + " and mask length " + str(masklen)
+            #print "Checking destination " + self.ftable[i][0] + " with masked IP " + str(ip_masked) + " and mask length " + str(masklen)
 
             if ip_masked == IPAddr(self.ftable[i][0]):
                 # masked IP address matches the network address
                 if masklen > lm_len:
                     # network address is the longest prefix
-                    print "found new longest prefix"
                     lm_index = i
                     lm_len = masklen
             
@@ -251,7 +245,6 @@ class Router(object):
         # 5a. where are we sending the packet?
         flag = 0
         if self.ftable[lm_index][2] == 'x':
-            print "Packet is going to final destination"
             # answer: straight to the final destination
             arpreq.protodst = pkt.payload.dstip
             # are we missing the MAC address of the final destination?
@@ -261,7 +254,6 @@ class Router(object):
                 ethhead.dst = self.maccache[arpreq.protodst]
                 
         else:
-            print "Packet is going to next hop"
             # answer: to the next hop
             arpreq.protodst = IPAddr(self.ftable[lm_index][2])
             # are we missing the MAC address of the nexthop?
@@ -283,7 +275,6 @@ class Router(object):
 
         # 5c. otherwise, we can just send the IP packet
         else:
-            print "Packet is good to go"
             ethhead.type = ethhead.IP_TYPE
             ethhead.payload = pkt.payload
 
@@ -304,7 +295,6 @@ class Router(object):
                 break
 
             entry = entry.split()
-            print entry
             ftable.append((entry[0], entry[1], entry[2], entry[3]))
 
             for intf in self.net.interfaces():
@@ -313,7 +303,6 @@ class Router(object):
 
                 if myportus == destus:
                     ftable.append((str(destus), str(intf.netmask), 'x', entry[3]))
-                    print str(destus) + ", " + str(intf.netmask) + ", x, " + str(entry[3])
 
         f.close()
         return ftable

@@ -200,8 +200,6 @@ class Router(object):
         print "PACKET HANDLER:"
         print "Pkt src: " + str(pkt.payload.srcip)
         print "Pkt dst: " + str(pkt.payload.dstip)
-        print "Eth src: " + str(pkt.src)
-        print "Eth dst: " + str(pkt.dst) + "\n"
 
         # 3. figure out where we are sending the packet
         lm_index = -1       # index of the packet destination
@@ -243,45 +241,54 @@ class Router(object):
         ethhead = pktlib.ethernet()
         arpreq = pktlib.arp()
 
-        for intf in self.net.interfaces():      # lookup MAC and IP source by port ID
+        for intf in self.net.interfaces():
             if intf.name == self.ftable[lm_index][3]:
                 ethhead.src = intf.ethaddr
+                arpreq.hwsrc = intf.ethaddr
                 arpreq.protosrc = intf.ipaddr
                 break
 
-
-        # 5a. do we know the MAC address of the destination?
-        if pkt.payload.dstip in self.maccache.keys():
-            # do we know the MAC address of the next hop?
-            if self.ftable[lm_index][2] in self.maccache.keys():
-                # we have enough information to generate our packet
-                ethhead.type = ethhead.IP_TYPE
-                ethhead.dst = self.maccache[IPAddr(self.ftable[lm_index][2])]
-                ethhead.payload = pkt.payload
-
-                print ethhead.dump()
-                return (self.ftable[lm_index][3],ethhead)   # return completed packet
-
-            else:
-                # no, so we need to send an ARP request for the MAC address of the destination
-                print "Missing next hop MAC"
-                arpreq.protodst = IPAddr(self.ftable[lm_index][2])
-
-        else:
-            # no, so we need to send an ARP request for the MAC address of the next hop
-            print "Missing destination MAC"
+        # 5a. where are we sending the packet?
+        flag = 0
+        if self.ftable[lm_index][2] == 'x':
+            print "Packet is going to final destination"
+            # answer: straight to the final destination
             arpreq.protodst = pkt.payload.dstip
+            # are we missing the MAC address of the final destination?
+            if not pkt.payload.dstip in self.maccache.keys():
+                flag = 1    # yes
+            else:
+                ethhead.dst = self.maccache[arpreq.protodst]
+                
+        else:
+            print "Packet is going to next hop"
+            # answer: to the next hop
+            arpreq.protodst = IPAddr(self.ftable[lm_index][2])
+            # are we missing the MAC address of the nexthop?
+            if not IPAddr(self.ftable[lm_index][2]) in self.maccache.keys():
+                flag = 1    # yes
+            else:
+                ethhead.dst = self.maccache[arpreq.protodst]
 
-        arpreq.opcode = pktlib.arp.REQUEST
-        arpreq.hwsrc = ethhead.src
-        arpreq.hwdst = ETHER_BROADCAST
-        ethhead.type = ethhead.ARP_TYPE
-        ethhead.dst = ETHER_BROADCAST
-        ethhead.payload = arpreq
-        self.jobqueue.append(PacketData(pkt,ethhead,self.ftable[lm_index][3]))
+        # 5b. if we've been flagged, we need to send an ARP request because we're missing our dst
+        if flag:
+            print "ARP request needed"
+            ethhead.type = ethhead.ARP_TYPE
+            ethhead.dst = ETHER_BROADCAST
+            arpreq.opcode = pktlib.arp.REQUEST
+            arpreq.hwdst = ETHER_BROADCAST
+            ethhead.payload = arpreq
             
+            self.jobqueue.append(PacketData(pkt,ethhead,self.ftable[lm_index][3]))   # add to job queue
+
+        # 5c. otherwise, we can just send the IP packet
+        else:
+            print "Packet is good to go"
+            ethhead.type = ethhead.IP_TYPE
+            ethhead.payload = pkt.payload
+
         print ethhead.dump()
-        return (self.ftable[lm_index][3],ethhead)            # return completed packet or ARP request
+        return (self.ftable[lm_index][3],ethhead)
 
     def buildft(self):
         '''
@@ -305,8 +312,8 @@ class Router(object):
                 destus = IPAddr(IPAddr(entry[2]).toUnsigned() & intf.netmask.toUnsigned())
 
                 if myportus == destus:
-                    ftable.append((str(destus), str(intf.netmask), entry[2], entry[3]))
-                    print str(destus) + ", " + str(intf.netmask) + ", " + str(entry[2]) + ", " + str(entry[3])
+                    ftable.append((str(destus), str(intf.netmask), 'x', entry[3]))
+                    print str(destus) + ", " + str(intf.netmask) + ", x, " + str(entry[3])
 
         f.close()
         return ftable

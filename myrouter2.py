@@ -201,84 +201,84 @@ class Router(object):
         print "Pkt src: " + str(pkt.payload.srcip)
         print "Pkt dst: " + str(pkt.payload.dstip)
         print "Eth src: " + str(pkt.src)
-        print "Eth dst: " + str(pkt.dst)
+        print "Eth dst: " + str(pkt.dst) + "\n"
 
         # 3. figure out where we are sending the packet
         lm_index = -1       # index of the packet destination
         lm_len = -1         # length of the longest prefix
         l = len(self.ftable)
 
-        # 3a. is the destination an exact match to a nexthop? (directly reachable)
+        # 3a. perform longest prefix match lookup
         i = 0
         while (i<l):
-            nexthop = IPAddr(self.ftable[i][2])
-        
-            if pkt.payload.dstip == nexthop:
-                # exact match found
-                lm_index = i
-                break
-        
+            mask = IPAddr(self.ftable[i][1])
+            masklen = netmask_to_cidr(mask)
+            mask_unsigned = mask.toUnsigned()
+            ip_unsigned = pkt.payload.dstip.toUnsigned()
+            
+            ip_masked = IPAddr(ip_unsigned & mask_unsigned)
+
+            print "Checking destination " + self.ftable[i][0] + " with masked IP " + str(ip_masked) + " and mask length " + str(masklen)
+
+            if ip_masked == IPAddr(self.ftable[i][0]):
+                # masked IP address matches the network address
+                if masklen > lm_len:
+                    # network address is the longest prefix
+                    print "found new longest prefix"
+                    lm_index = i
+                    lm_len = masklen
+            
             i+=1
-
-        # 3b. perform longest prefix match lookup if no exact match exists
-        if lm_index == -1:
-            i = 0
-            while (i<l):
-                mask = IPAddr(self.ftable[i][1])
-                masklen = netmask_to_cidr(mask)
-                mask_unsigned = mask.toUnsigned()
-                ip_unsigned = pkt.payload.dstip.toUnsigned()
-                
-                ip_masked = IPAddr(ip_unsigned & mask_unsigned)
-
-                if ip_masked == IPAddr(self.ftable[i][0]):
-                    # masked IP address matches the network address
-                    if masklen > lm_len:
-                        # network address is the longest prefix
-                        lm_index = i
-                        lm_len = masklen
-                
-                i+=1
 
         # 4. did we find a match in the table?
         if lm_index == -1:
             print "No match found in forwarding table"
             return 0    # no
+        else:
+            print "Packet should be sent to " + str(pkt.payload.dstip) + " out interface " + self.ftable[lm_index][3]
 
-        # 5. create a new ethernet header for the packet
-        print "Packet should be sent to " + self.ftable[lm_index][2] + " out interface " + self.ftable[lm_index][3]
-
+        # 5. create either the finished IP packet or an ARP packet
         pkt.payload.ttl -= 1        # decrement ttl
 
         ethhead = pktlib.ethernet()
+        arpreq = pktlib.arp()
 
         for intf in self.net.interfaces():      # lookup MAC and IP source by port ID
             if intf.name == self.ftable[lm_index][3]:
                 ethhead.src = intf.ethaddr
-                potprotosrc = intf.ipaddr
+                arpreq.protosrc = intf.ipaddr
                 break
 
-        # 5a. do we already know the MAC address of the destination?
+
+        # 5a. do we know the MAC address of the destination?
         if pkt.payload.dstip in self.maccache.keys():
-            ethhead.type = ethhead.IP_TYPE
-            ethhead.dst = self.maccache[pkt.payload.dstip]
+            # do we know the MAC address of the next hop?
+            if self.ftable[lm_index][2] in self.maccache.keys():
+                # we have enough information to generate our packet
+                ethhead.type = ethhead.IP_TYPE
+                ethhead.dst = self.maccache[IPAddr(self.ftable[lm_index][2])]
+                ethhead.payload = pkt.payload
 
-            etthead.payload = pkt.payload                    # payload is the IP packet
-            
-        # 5b. if not, generate an ARP request for the MAC address and add to queue
+                print ethhead.dump()
+                return (self.ftable[lm_index][3],ethhead)   # return completed packet
+
+            else:
+                # no, so we need to send an ARP request for the MAC address of the destination
+                print "Missing next hop MAC"
+                arpreq.protodst = IPAddr(self.ftable[lm_index][2])
+
         else:
-            ethhead.type = ethhead.ARP_TYPE
-            ethhead.dst = ETHER_BROADCAST
+            # no, so we need to send an ARP request for the MAC address of the next hop
+            print "Missing destination MAC"
+            arpreq.protodst = pkt.payload.dstip
 
-            arpreq = pktlib.arp()
-            arpreq.opcode = pktlib.arp.REQUEST
-            arpreq.protosrc = potprotosrc
-            arpreq.protodst = IPAddr(self.ftable[lm_index][2])
-            arpreq.hwsrc = ethhead.src
-            arpreq.hwdst = ETHER_BROADCAST
-
-            ethhead.payload = arpreq                         # payload is the ARP request
-            self.jobqueue.append(PacketData(pkt,ethhead,self.ftable[lm_index][3]))    # add to job queue
+        arpreq.opcode = pktlib.arp.REQUEST
+        arpreq.hwsrc = ethhead.src
+        arpreq.hwdst = ETHER_BROADCAST
+        ethhead.type = ethhead.ARP_TYPE
+        ethhead.dst = ETHER_BROADCAST
+        ethhead.payload = arpreq
+        self.jobqueue.append(PacketData(pkt,ethhead,self.ftable[lm_index][3]))
             
         print ethhead.dump()
         return (self.ftable[lm_index][3],ethhead)            # return completed packet or ARP request
@@ -293,12 +293,20 @@ class Router(object):
 
         while 1:
             entry = f.readline()
-
             if entry == "":
                 break
 
             entry = entry.split()
+            print entry
             ftable.append((entry[0], entry[1], entry[2], entry[3]))
+
+            for intf in self.net.interfaces():
+                myportus = IPAddr(intf.ipaddr.toUnsigned() & intf.netmask.toUnsigned())
+                destus = IPAddr(IPAddr(entry[2]).toUnsigned() & intf.netmask.toUnsigned())
+
+                if myportus == destus:
+                    ftable.append((str(destus), str(intf.netmask), entry[2], entry[3]))
+                    print str(destus) + ", " + str(intf.netmask) + ", " + str(entry[2]) + ", " + str(entry[3])
 
         f.close()
         return ftable

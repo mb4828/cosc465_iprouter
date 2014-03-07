@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 '''
-Basic IPv4 router (static routing) in Python, stage 1.
+Basic IPv4 router (static routing) in Python
 '''
 
 import sys

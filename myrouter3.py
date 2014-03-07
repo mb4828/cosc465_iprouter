@@ -94,58 +94,7 @@ class Router(object):
             rv = self.ICMPreqhandler(pkt)
             if rv != 0:
                 self.net.send_packet(dev, rv)
-    
-    def ICMPreqhandler(self, pkt):
-        '''
-        Handles ICMP echo requests. Returns an ICMP packet of type echo reply.
-        '''
-        # 1. is this an ICMP packet?
-        if not (pkt.type == pkt.IP_TYPE) and (pkt.payload.protocol == pkt.payload.ICMP_PROTOCOL):
-            return 0    # no
         
-        # 2. is this an echo request?
-        if not (pkt.payload.payload.type == TYPE_ECHO_REQUEST):
-            return 0    # no
-
-        # 3. is it for me?
-        if not (pkt.payload.dstip in self.myports.keys()):
-            return 0    # no
-
-        # 4. respond to the echo request
-        print "ICMP REQUEST HANDLER:"
-        print pkt.dump()
-
-        req = pkt.find('icmp')
-
-        # 4a. create an echo response
-        icmprsp = pktlib.icmp()
-        icmprsp.type = TYPE_ECHO_REPLY
-        ping = pktlib.echo()
-        ping.id = req.payload.id
-        ping.seq = req.payload.seq
-        icmprsp.payload = ping
-
-        # 4b. encapsulate in an IPv4 packet
-        ippkt = pktlib.ipv4()
-        ippkt.protocol = ippkt.ICMP_PROTOCOL
-        ippkt.srcip = pkt.payload.dstip
-        ippkt.dstip = pkt.payload.srcip
-        ippkt.payload = icmprsp
-
-        # 4c. encapsulate in an ethernet packet
-        lm_index = self.lpmhelper(ippkt.dstip)
-        ethpkt = self.packethelper(ippkt, lm_index)
-
-        # 5. update job queue if necessary
-        if ethpkt.type == ethpkt.ARP_TYPE:
-            self.jobqueue.append(PacketData(pkt.payload,ethpkt,self.ftable[lm_index][3]))
-
-        print ethpkt.dump()
-        return ethpkt
-        
-        
-
-
     def queueupdater(self):
         '''
         Checks the head of the job queue for dead (no more retries) or expired (time to
@@ -337,6 +286,54 @@ class Router(object):
 
         print ethpkt.dump()
         return (self.ftable[lm_index][3],ethpkt)
+
+    def ICMPreqhandler(self, pkt):
+        '''
+        Handles ICMP echo requests. Returns an ICMP echo reply or an ARP request.
+        '''
+        # 1. is this an ICMP packet?
+        if not (pkt.type == pkt.IP_TYPE) and (pkt.payload.protocol == pkt.payload.ICMP_PROTOCOL):
+            return 0    # no
+        
+        # 2. is this an echo request?
+        if not (pkt.payload.payload.type == TYPE_ECHO_REQUEST):
+            return 0    # no
+
+        # 3. is it for me?
+        if not (pkt.payload.dstip in self.myports.keys()):
+            return 0    # no
+
+        # 4. respond to the echo request
+        print "ICMP REQUEST HANDLER:"
+        print pkt.dump()
+
+        req = pkt.find('icmp')
+
+        # 4a. create an echo response
+        icmprsp = pktlib.icmp()
+        icmprsp.type = TYPE_ECHO_REPLY
+        ping = pktlib.echo()
+        ping.id = req.payload.id
+        ping.seq = req.payload.seq
+        icmprsp.payload = ping
+
+        # 4b. encapsulate in an IPv4 packet
+        ippkt = pktlib.ipv4()
+        ippkt.protocol = ippkt.ICMP_PROTOCOL
+        ippkt.srcip = pkt.payload.dstip
+        ippkt.dstip = pkt.payload.srcip
+        ippkt.payload = icmprsp
+
+        # 4c. encapsulate in an ethernet packet
+        lm_index = self.lpmhelper(ippkt.dstip)
+        ethpkt = self.packethelper(ippkt, lm_index)
+
+        # 5. update job queue if necessary
+        if ethpkt.type == ethpkt.ARP_TYPE:
+            self.jobqueue.append(PacketData(pkt.payload,ethpkt,self.ftable[lm_index][3]))
+
+        print ethpkt.dump()
+        return ethpkt
 
     def buildft(self):
         '''

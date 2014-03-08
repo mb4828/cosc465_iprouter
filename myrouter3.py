@@ -53,7 +53,6 @@ class Router(object):
             self.myports[intf.ipaddr] = intf.ethaddr
 
         self.printft()
-        print self.myports.keys()
 
     def router_main(self):    
         while True:
@@ -103,110 +102,6 @@ class Router(object):
             rv = self.miscpackethandler(pkt, dev)
             if rv != 0:
                 self.net.send_packet(rv[0], rv[1])                  # send port unreachable error or ARP req
-        
-    def queueupdater(self):
-        '''
-        Checks the head of the job queue for dead (no more retries) or expired (time to
-        re-send ARP request) jobs. Returns 0 if no action needed or (interface, arpreq)
-        if it's time to resend
-        '''
-        # 1. is the job queue empty?
-        if len(self.jobqueue) <= 0:
-            return 0
-
-        # 2. is the head of the queue dead? (no more retries)
-        if self.jobqueue[0].isDead():
-            print "QUEUE UPDATER:\nRetries left: 0 - ARP request has expired"
-            head = self.jobqueue.popleft()
-
-            # create host unreachable error
-            ippkt = self.ICMPhstunreachhelper(head.pkt, head.din)
-            lm_index = self.lpmhelper(ippkt.srcip)
-            if lm_index == -1:
-                return 0    # throw up hands in defeat
-            ethpkt = self.packethelper(ippkt, lm_index, head.din, 1)
-
-            print "Packet will be sent out " + head.din
-            print ethpkt.dump()
-            return (head.din, ethpkt)
-
-        # 3. has the head of the queue timed out? (time to re-send ARP request)
-        if self.jobqueue[0].isTime():
-            print "QUEUE UPDATER:\nRetries left on " + str(self.jobqueue[0].ip) + ": " + str(self.jobqueue[0].retries)
-            self.jobqueue[0].logRetry()
-            return (self.jobqueue[0].dout, self.jobqueue[0].arpreq)
-
-        return 0
-            
-    def arprephandler(self, pkt):
-        '''
-        Matches ARP replies and ICMP replies with jobs in the job queue and constructs 
-        an outgoing IP packet for them. Returns 0 if no action necessary and 
-        (interface, IP packet) if packet is ready
-        '''
-        # 1. is this an ARP reply?
-        if pkt.type != pkt.ARP_TYPE:
-            return 0    # no
-        if pkt.payload.opcode != arp.REPLY:
-            return 0    # we don't handle ARP requests
-
-        # 2. is it for me?
-        if not pkt.payload.protodst in self.myports.keys():
-            return 0    # no
-
-        # 3. does this MAC address match any of the jobs waiting in the queue
-        for i in range(len(self.jobqueue)):
-            if pkt.payload.protosrc == self.jobqueue[i].ip:
-                # 3a. construct a finished packet to be sent out and return
-                print "QUEUE HANDLER:"
-                print "Got an ARP reply for " + str(self.jobqueue[i].ip)
-                ethhead = pktlib.ethernet()
-                ethhead.type = ethhead.IP_TYPE
-                ethhead.src = self.jobqueue[i].arpreq.src
-                ethhead.dst = pkt.payload.hwsrc
-                ethhead.payload = self.jobqueue[i].pkt
-                intf = self.jobqueue[i].dout
-
-                del self.jobqueue[i]
-
-                print "Job completed. Ready to send"
-                print ethhead.dump()
-                return (intf, ethhead)
-
-        return 0
-
-    def arpreqhandler(self, pkt):
-        '''
-        Identifies incoming ARP requests and generates an ARP reply. Returns 0 if packet
-        is not an ARP request and ARP reply otherwise
-        '''
-        # 1. is this an ARP request?
-        if pkt.type != pkt.ARP_TYPE:
-            return 0    # no
-        if pkt.payload.opcode != arp.REQUEST:
-            return 0    # we don't handle ARP replies
-
-        # 2. is it for me?
-        if not pkt.payload.protodst in self.myports.keys():
-            return 0    # no
-
-        print "ARP REQUEST HANDLER:"        
-        # 3. generate ARP reply
-        arp_reply = pktlib.arp()
-        arp_reply.opcode = pktlib.arp.REPLY
-        arp_reply.protosrc = pkt.payload.protodst
-        arp_reply.protodst = pkt.payload.protosrc
-        arp_reply.hwsrc = self.myports[pkt.payload.protodst]
-        arp_reply.hwdst = pkt.payload.hwsrc
-
-        ether_reply = pktlib.ethernet()
-        ether_reply.type = ether_reply.ARP_TYPE
-        ether_reply.src = self.myports[pkt.payload.protodst]
-        ether_reply.dst = pkt.src
-        ether_reply.set_payload(arp_reply)
-        
-        # 4. hand off ARP reply back to router main
-        return ether_reply
 
     def lpmhelper(self, dstip):
         '''
@@ -244,10 +139,7 @@ class Router(object):
         ethhead = pktlib.ethernet()
         arpreq = pktlib.arp()
 
-        if not devflag:
-            intf = self.net.interface_by_name(self.ftable[lm_index][3])
-        else:
-            intf = self.net.interface_by_name(dev)
+        intf = self.net.interface_by_name(self.ftable[lm_index][3])
         ethhead.src = intf.ethaddr
         
         # where are we sending the packet?
@@ -349,6 +241,77 @@ class Router(object):
         '''
         return self.ICMPerrorgen(pkt, 3, port)
 
+    def queueupdater(self):
+        '''
+        Checks the head of the job queue for dead (no more retries) or expired (time to
+        re-send ARP request) jobs. Returns 0 if no action needed or (interface, arpreq)
+        if it's time to resend
+        '''
+        # 1. is the job queue empty?
+        if len(self.jobqueue) <= 0:
+            return 0
+
+        # 2. is the head of the queue dead? (no more retries)
+        if self.jobqueue[0].isDead():
+            print "QUEUE UPDATER:\nRetries left: 0 - ARP request has expired"
+            head = self.jobqueue.popleft()
+
+            # create host unreachable error
+            ippkt = self.ICMPhstunreachhelper(head.pkt, head.din)
+            lm_index = self.lpmhelper(ippkt.srcip)
+            if lm_index == -1:
+                return 0    # throw up hands in defeat
+            ethpkt = self.packethelper(ippkt, lm_index, head.din, 1)
+
+            print "Packet will be sent out " + head.din
+            print ethpkt.dump()
+            return (head.din, ethpkt)
+
+        # 3. has the head of the queue timed out? (time to re-send ARP request)
+        if self.jobqueue[0].isTime():
+            print "QUEUE UPDATER:\nRetries left on " + str(self.jobqueue[0].ip) + ": " + str(self.jobqueue[0].retries)
+            self.jobqueue[0].logRetry()
+            return (self.jobqueue[0].dout, self.jobqueue[0].arpreq)
+
+        return 0
+            
+    def arprephandler(self, pkt):
+        '''
+        Matches ARP replies and ICMP replies with jobs in the job queue and constructs 
+        an outgoing IP packet for them. Returns 0 if no action necessary and 
+        (interface, IP packet) if packet is ready
+        '''
+        # 1. is this an ARP reply?
+        if pkt.type != pkt.ARP_TYPE:
+            return 0    # no
+        if pkt.payload.opcode != arp.REPLY:
+            return 0    # we don't handle ARP requests
+
+        # 2. is it for me?
+        if not pkt.payload.protodst in self.myports.keys():
+            return 0    # no
+
+        # 3. does this MAC address match any of the jobs waiting in the queue
+        for i in range(len(self.jobqueue)):
+            if pkt.payload.protosrc == self.jobqueue[i].ip:
+                # 3a. construct a finished packet to be sent out and return
+                print "QUEUE HANDLER:"
+                print "Got an ARP reply for " + str(self.jobqueue[i].ip)
+                ethhead = pktlib.ethernet()
+                ethhead.type = ethhead.IP_TYPE
+                ethhead.src = self.jobqueue[i].arpreq.src
+                ethhead.dst = pkt.payload.hwsrc
+                ethhead.payload = self.jobqueue[i].pkt
+                intf = self.jobqueue[i].dout
+
+                del self.jobqueue[i]
+
+                print "Job completed. Ready to send"
+                print ethhead.dump()
+                return (intf, ethhead)
+
+        return 0
+
     def packethandler(self, pkt, dev):
         '''
         Handles packets destined for other hosts by generating an ARP request
@@ -391,6 +354,39 @@ class Router(object):
 
         print ethpkt.dump()
         return (self.ftable[lm_index][3],ethpkt)
+
+    def arpreqhandler(self, pkt):
+        '''
+        Identifies incoming ARP requests and generates an ARP reply. Returns 0 if packet
+        is not an ARP request and ARP reply otherwise
+        '''
+        # 1. is this an ARP request?
+        if pkt.type != pkt.ARP_TYPE:
+            return 0    # no
+        if pkt.payload.opcode != arp.REQUEST:
+            return 0    # we don't handle ARP replies
+
+        # 2. is it for me?
+        if not pkt.payload.protodst in self.myports.keys():
+            return 0    # no
+
+        print "ARP REQUEST HANDLER:"        
+        # 3. generate ARP reply
+        arp_reply = pktlib.arp()
+        arp_reply.opcode = pktlib.arp.REPLY
+        arp_reply.protosrc = pkt.payload.protodst
+        arp_reply.protodst = pkt.payload.protosrc
+        arp_reply.hwsrc = self.myports[pkt.payload.protodst]
+        arp_reply.hwdst = pkt.payload.hwsrc
+
+        ether_reply = pktlib.ethernet()
+        ether_reply.type = ether_reply.ARP_TYPE
+        ether_reply.src = self.myports[pkt.payload.protodst]
+        ether_reply.dst = pkt.src
+        ether_reply.set_payload(arp_reply)
+        
+        # 4. hand off ARP reply back to router main
+        return ether_reply
 
     def ICMPreqhandler(self, pkt, dev):
         '''

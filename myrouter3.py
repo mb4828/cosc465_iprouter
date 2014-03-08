@@ -16,15 +16,14 @@ from pox.lib.packet import arp
 from pox.lib.addresses import EthAddr,IPAddr,netmask_to_cidr
 from srpy_common import log_info, log_debug, log_warn, SrpyShutdown, SrpyNoPackets, debugger
 from collections import deque
-TYPE_ECHO_REQUEST=8
-TYPE_ECHO_REPLY=0
 
 class PacketData(object):
-    def __init__(self, ippkt, arpreq, interface):
+    def __init__(self, ippkt, arpreq, dout, din):
         self.pkt = ippkt                    # packet waiting to be sent
-        self.arpreq = arpreq                # copy of the arp request
-        self.interface = interface          # interface that we are sending packets out of
-        self.ip = arpreq.payload.protodst   # ip address that we're wating for (because I'm a lazy programmer)
+        self.arpreq = arpreq                # copy of the arp request (ethernet packet)
+        self.din = din                      # interface that original packet arrived on
+        self.dout = dout                    # interface that we are sending packets out of
+        self.ip = arpreq.payload.protodst   # ip address that we're wating for
         self.lastsent = time.time()         # approximate time of last ARP request
         self.retries = 4                    # number of retries left
 
@@ -53,6 +52,9 @@ class Router(object):
         for intf in net.interfaces():
             self.myports[intf.ipaddr] = intf.ethaddr
 
+        self.printft()
+        print self.myports.keys()
+
     def router_main(self):    
         while True:
             print "-"*64
@@ -63,37 +65,44 @@ class Router(object):
                 # 1. update/resend expired jobs in the job queue
                 rv = self.queueupdater()
                 if rv != 0:
-                    self.net.send_packet(rv[0], rv[1])              # re-send ARP req 
+                    self.net.send_packet(rv[0], rv[1])              # re-send ARP req
               
                 continue
 
             except SrpyShutdown:
                 return
 
-            # 2. handle ARP replies and ICMP replies
-            rv = self.queuehandler(pkt)
+            # 2. handle ARP replies for me
+            rv = self.arprephandler(pkt)
             if rv != 0:
                 self.net.send_packet(rv[0], rv[1])                  # send completed packet
-                self.maccache[pkt.payload.protosrc] = pkt.payload.hwsrc # log MAC address
+                self.maccache[pkt.payload.protosrc] = pkt.src       # log MAC address
                 continue
 
-            # 3. handle ARP requests for my interfaces
+            # 3. handle IP packets destined for other hosts
+            rv = self.packethandler(pkt, dev)
+            if rv != 0:
+                self.net.send_packet(rv[0], rv[1])                  # send IP packet or ARP req
+                continue
+
+            # 4. handle ARP requests for my interfaces
             rv = self.arpreqhandler(pkt)
             if rv != 0:
                 self.net.send_packet(dev, rv)                       # send ARP reply
                 self.maccache[pkt.payload.protosrc] = pkt.src       # log MAC address
                 continue
 
-            # 4. handle IP packets destined for me and other hosts
-            rv = self.packethandler(pkt)
+            # 5. handle ICMP echo requests for me
+            rv = self.ICMPreqhandler(pkt, dev)
             if rv != 0:
-                self.net.send_packet(rv[0], rv[1])                  # send IP packet or ARP req
+                self.net.send_packet(rv[0], rv[1])                  # send echo reply or ARP req
+                self.maccache[pkt.payload.srcip] = pkt.src          # log MAC address
                 continue
 
-            # 5. handle ICMP echo requests
-            rv = self.ICMPreqhandler(pkt)
+            # 6. handle misc packets addressed to me
+            rv = self.miscpackethandler(pkt, dev)
             if rv != 0:
-                self.net.send_packet(dev, rv)
+                self.net.send_packet(rv[0], rv[1])                  # send port unreachable error or ARP req
         
     def queueupdater(self):
         '''
@@ -107,19 +116,29 @@ class Router(object):
 
         # 2. is the head of the queue dead? (no more retries)
         if self.jobqueue[0].isDead():
-            self.jobqueue.popleft()
             print "QUEUE UPDATER:\nRetries left: 0 - ARP request has expired"
-            return 0
+            head = self.jobqueue.popleft()
+
+            # create host unreachable error
+            ippkt = self.ICMPhstunreachhelper(head.pkt, head.din)
+            lm_index = self.lpmhelper(ippkt.srcip)
+            if lm_index == -1:
+                return 0    # throw up hands in defeat
+            ethpkt = self.packethelper(ippkt, lm_index, head.din, 1)
+
+            print "Packet will be sent out " + head.din
+            print ethpkt.dump()
+            return (head.din, ethpkt)
 
         # 3. has the head of the queue timed out? (time to re-send ARP request)
         if self.jobqueue[0].isTime():
             print "QUEUE UPDATER:\nRetries left on " + str(self.jobqueue[0].ip) + ": " + str(self.jobqueue[0].retries)
             self.jobqueue[0].logRetry()
-            return (self.jobqueue[0].interface, self.jobqueue[0].arpreq)
+            return (self.jobqueue[0].dout, self.jobqueue[0].arpreq)
 
         return 0
             
-    def queuehandler(self, pkt):
+    def arprephandler(self, pkt):
         '''
         Matches ARP replies and ICMP replies with jobs in the job queue and constructs 
         an outgoing IP packet for them. Returns 0 if no action necessary and 
@@ -146,13 +165,15 @@ class Router(object):
                 ethhead.src = self.jobqueue[i].arpreq.src
                 ethhead.dst = pkt.payload.hwsrc
                 ethhead.payload = self.jobqueue[i].pkt
-                intf = self.jobqueue[i].interface
+                intf = self.jobqueue[i].dout
 
                 del self.jobqueue[i]
 
                 print "Job completed. Ready to send"
                 print ethhead.dump()
                 return (intf, ethhead)
+
+        return 0
 
     def arpreqhandler(self, pkt):
         '''
@@ -214,15 +235,19 @@ class Router(object):
 
         return lm_index
 
-    def packethelper(self, ippkt, lm_index):
+    def packethelper(self, ippkt, lm_index, dev, devflag=0):
         '''
-        Helper function. Returns either a finished IP packet or an ARP request
-        based on the contents of pkt and the forwarding table index
+        Helper function. Returns either a finished ethernet packet or an ARP request
+        based on the contents of pkt and the forwarding table index. Logs any ARP
+        requests in the jobqueue
         '''
         ethhead = pktlib.ethernet()
         arpreq = pktlib.arp()
 
-        intf = self.net.interface_by_name(self.ftable[lm_index][3])
+        if not devflag:
+            intf = self.net.interface_by_name(self.ftable[lm_index][3])
+        else:
+            intf = self.net.interface_by_name(dev)
         ethhead.src = intf.ethaddr
         
         # where are we sending the packet?
@@ -245,6 +270,12 @@ class Router(object):
             arpreq.protosrc = intf.ipaddr
             arpreq.hwsrc = intf.ethaddr
             arpreq.hwdst = ETHER_BROADCAST
+
+            # log ARP request in job queue
+            if not devflag:
+                self.jobqueue.append(PacketData(ippkt,ethhead,self.ftable[lm_index][3],dev))
+            else:
+                self.jobqueue.append(PacketData(ippkt,ethhead,dev,dev))
         else:
             ethhead.type = ethhead.IP_TYPE
             ethhead.dst = self.maccache[arpreq.protodst]
@@ -252,51 +283,125 @@ class Router(object):
 
         return ethhead
 
-    def packethandler(self, pkt):
+    def ICMPerrorgen(self, pkt, t, port=0):
         '''
-        Handles packets destined for other hosts by generating either an ARP request
-        or a new, completed packet. Returns 0 if no action is necessary and
-        (interface, packet) otherwise
+        Helper function. Takes an ethernet packet and generates an IP+ICMP 
+        packet with type t:
+            0 - time exceeded
+            1 - unreachable network
+            2 - unreachable port
+            3 - unreachable host
+        '''
+        # create ICMP packet
+        icmppkt = pktlib.icmp()
+        icmppkt.payload = pktlib.unreach()
+        icmppkt.payload.payload = pkt.payload.dump()[:28]
+
+        # set type
+        if t==0:
+            icmppkt.type = pktlib.TYPE_TIME_EXCEED
+        else:
+            icmppkt.type = pktlib.TYPE_DEST_UNREACH
+            if t==1:
+                icmppkt.code = pktlib.CODE_UNREACH_NET
+            elif t==2:
+                icmppkt.code = pktlib.CODE_UNREACH_PORT
+            else:
+                icmppkt.code = pktlib.CODE_UNREACH_HOST
+
+        # encapsulate in an IPv4 packet
+        ippkt = pktlib.ipv4()
+        ippkt.protocol = ippkt.ICMP_PROTOCOL
+        ippkt.payload = icmppkt
+
+        if t!=3:
+            # pkt is the ethernet packet we received so we just flip the src and dst
+            ippkt.srcip = self.net.interface_by_macaddr(pkt.dst).ipaddr
+            ippkt.dstip = pkt.payload.srcip
+        else:
+            # pkt is the IP packet that failed to send
+            ippkt.srcip = self.net.interface_by_name(port).ipaddr
+            ippkt.dstip = pkt.srcip
+
+        return ippkt
+
+    def ICMPtimexhelper(self, pkt):
+        '''
+        Helper function. Generates IP+ICMP packet with time exceeded error
+        '''
+        return self.ICMPerrorgen(pkt, 0)
+        
+    def ICMPnetunreachhelper(self, pkt):
+        '''
+        Helper function. Generates IP+ICMP packet with network unreachable error
+        '''
+        return self.ICMPerrorgen(pkt, 1)
+
+    def ICMPprtunreachhelper(self, pkt):
+        '''
+        Helper function. Generates IP+ICMP packet with port unreachable error
+        '''
+        return self.ICMPerrorgen(pkt, 2)
+
+    def ICMPhstunreachhelper(self, pkt, port):
+        '''
+        Helper function. Generates IP+ICMP packet with host unreachable error
+        '''
+        return self.ICMPerrorgen(pkt, 3, port)
+
+    def packethandler(self, pkt, dev):
+        '''
+        Handles packets destined for other hosts by generating an ARP request
+        or a new ethernet packet. Supports ICMP time expired and unreachable
+        errors. Returns 0 if no action is necessary and (interface, packet) otherwise
         '''
         # 1. is this an IP packet?
         if pkt.type != pkt.IP_TYPE:
             return 0    # no
 
-        # 2. is the packet for me?
+        # 2. is it for me?
         if pkt.payload.dstip in self.myports.keys():
-            return 0    # drop the packet
+            return 0    # yes
 
-        print "PACKET HANDLER:\nPkt dst: " + str(pkt.payload.dstip)
+        print "PACKET HANDLER:\nPkt src: "+str(pkt.payload.srcip)+"\nPkt dst: " + str(pkt.payload.dstip)
 
-        # 3. perform longest prefix match to begin computing packet destination
-        lm_index = self.lpmhelper(pkt.payload.dstip)    # helper functions rock!
+        # 3. is the TTL expired?
+        pkt.payload.ttl -= 1
+        if pkt.payload.ttl <= 0:
+            # create an ICMP time exceeded error
+            ippkt = self.ICMPtimexhelper(pkt)
+        else:
+            ippkt = pkt.payload
 
-        # 4. did we find a match in the table?
+        # 4. perform longest prefix match to begin computing packet destination
+        lm_index = self.lpmhelper(ippkt.dstip)
+
+        # 5. did we find a match in the table?
         if lm_index == -1:
+            # create an ICMP network unreachable error
             print "No match found in forwarding table"
-            return 0    # no
+            ippkt = self.ICMPnetunreachhelper(pkt)
+            lm_index = self.lpmhelper(ippkt.dstip)  # route back to the source
 
-        # 5. create either the finished IP packet or an ARP request
-        pkt.payload.ttl -= 1                            # decrement the ttl
-        ethpkt = self.packethelper(pkt.payload, lm_index)       # helper functions rock!
+            if lm_index == -1:
+                return 0    # if no route to source, give up
 
-        # 6. update job queue if needed
-        if ethpkt.type == ethpkt.ARP_TYPE:
-            self.jobqueue.append(PacketData(pkt.payload,ethpkt,self.ftable[lm_index][3]))
+        # 6. create either the finished ethernet packet or an ARP request
+        ethpkt = self.packethelper(ippkt, lm_index, dev)
 
         print ethpkt.dump()
         return (self.ftable[lm_index][3],ethpkt)
 
-    def ICMPreqhandler(self, pkt):
+    def ICMPreqhandler(self, pkt, dev):
         '''
-        Handles ICMP echo requests. Returns an ICMP echo reply or an ARP request.
+        Handles ICMP echo requests. Returns 0, an ICMP echo reply, or an ARP request
         '''
         # 1. is this an ICMP packet?
-        if not (pkt.type == pkt.IP_TYPE) and (pkt.payload.protocol == pkt.payload.ICMP_PROTOCOL):
+        if not ((pkt.type == pkt.IP_TYPE) and (pkt.payload.protocol == pkt.payload.ICMP_PROTOCOL)):
             return 0    # no
         
         # 2. is this an echo request?
-        if not (pkt.payload.payload.type == TYPE_ECHO_REQUEST):
+        if not (pkt.payload.payload.type == pktlib.TYPE_ECHO_REQUEST):
             return 0    # no
 
         # 3. is it for me?
@@ -311,7 +416,7 @@ class Router(object):
 
         # 4a. create an echo response
         icmprsp = pktlib.icmp()
-        icmprsp.type = TYPE_ECHO_REPLY
+        icmprsp.type = pktlib.TYPE_ECHO_REPLY
         ping = pktlib.echo()
         ping.id = req.payload.id
         ping.seq = req.payload.seq
@@ -324,16 +429,36 @@ class Router(object):
         ippkt.dstip = pkt.payload.srcip
         ippkt.payload = icmprsp
 
-        # 4c. encapsulate in an ethernet packet
+        # 4c. encapsulate in an ethernet packet or create ARP request
         lm_index = self.lpmhelper(ippkt.dstip)
-        ethpkt = self.packethelper(ippkt, lm_index)
-
-        # 5. update job queue if necessary
-        if ethpkt.type == ethpkt.ARP_TYPE:
-            self.jobqueue.append(PacketData(pkt.payload,ethpkt,self.ftable[lm_index][3]))
+        if lm_index == -1:
+            return 0    # throw up hands in defeat
+        ethpkt = self.packethelper(ippkt, lm_index, dev)
 
         print ethpkt.dump()
-        return ethpkt
+        return (self.ftable[lm_index][3],ethpkt)
+
+    def miscpackethandler(self, pkt, dev):
+        '''
+        Handles all miscellaneous packets addressed to me (assumes that ARP requests
+        and ICMP echo requests have been dealt with). Returns 0, an ICMP unreachable
+        error, or an ARP request
+        '''
+        # 1. is it for me?
+        if not (pkt.payload.dstip in self.myports.keys()):
+            return 0    # no
+
+        print "MISC PACKET HANDLER:\nPkt src: "+str(pkt.payload.srcip)
+
+        # 2. assume no one else knew what to do with this packet. generate an ICMP port unreachable error
+        ippkt = self.ICMPprtunreachhelper(pkt)
+        lm_index = self.lpmhelper(ippkt.srcip)
+        if lm_index == -1:
+            return 0    # throw up hands in defeat
+        ethpkt = self.packethelper(ippkt, lm_index, dev)
+
+        print ethpkt.dump()
+        return (self.ftable[lm_index][3],ethpkt)
 
     def buildft(self):
         '''
@@ -341,7 +466,7 @@ class Router(object):
         Entry: (network address, subnet mask, next hop, output interface)
         '''
         ftable = []
-        f = open('forwarding_table.txt','r')
+        f = open('forwarding_table3.txt','r')
 
         while 1:
             entry = f.readline()
@@ -360,6 +485,18 @@ class Router(object):
                                                                                              # using intf netmask and 'x' for nexthop
         f.close()
         return ftable
+
+    def printft(self):
+        '''
+        Diagnostic function. Prints the contents of the forwarding table in a human-readable format
+        '''
+        print "-"*64+"\nFORWARDING TABLE:\nnetwork address"+" "*5+"subnet mask"+" "*9+"next hop"+" "*12+"interface"
+        for entry in self.ftable:
+            ld = len("000.000.000.000")
+            l0 = len(str(entry[0]))
+            l1 = len(str(entry[1]))
+            l2 = len(str(entry[2]))
+            print str(entry[0]) + " "*(ld-l0+5) + str(entry[1]) + " "*(ld-l1+5) + str(entry[2]) + " "*(ld-l2+5) + str(entry[3])
 
 def srpy_main(net):
     '''

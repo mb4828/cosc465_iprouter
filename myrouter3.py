@@ -17,6 +17,8 @@ from pox.lib.addresses import EthAddr,IPAddr,netmask_to_cidr
 from srpy_common import log_info, log_debug, log_warn, SrpyShutdown, SrpyNoPackets, debugger
 from collections import deque
 
+ftablename = "forwarding_table.txt"        # FORWARDING TABLE FILENAME - YOU MIGHT NEED THIS!
+
 class PacketData(object):
     def __init__(self, ippkt, arpreq, dout, din):
         self.pkt = ippkt                    # packet waiting to be sent
@@ -187,7 +189,10 @@ class Router(object):
         # create ICMP packet
         icmppkt = pktlib.icmp()
         icmppkt.payload = pktlib.unreach()
-        icmppkt.payload.payload = pkt.payload.dump()[:28]
+        if t!=3:
+            icmppkt.payload.payload = pkt.payload.dump()[:28]
+        else:
+            icmppkt.payload.payload = pkt.dump()[:28]
 
         # set type
         if t==0:
@@ -263,7 +268,6 @@ class Router(object):
                 return 0    # throw up hands in defeat
             ethpkt = self.packethelper(ippkt, lm_index, head.din, 1)
 
-            print "Packet will be sent out " + head.din
             print ethpkt.dump()
             return (head.din, ethpkt)
 
@@ -462,7 +466,7 @@ class Router(object):
         Entry: (network address, subnet mask, next hop, output interface)
         '''
         ftable = []
-        f = open('forwarding_table3.txt','r')
+        f = open(ftablename,'r')
 
         while 1:
             entry = f.readline()
